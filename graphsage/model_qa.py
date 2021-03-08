@@ -9,6 +9,8 @@ import random
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import f1_score
 from collections import defaultdict
+import tqdm
+from tqdm import tqdm
 
 from encoders import Encoder
 from aggregators import MeanAggregator
@@ -66,8 +68,8 @@ class SupervisedGraphSage(nn.Module):
         self.xent = nn.MSELoss()
     
     def get_score(self,q_embeds,u_embeds):
-        cos = nn.CosineSimilarity(dim=1, eps=1e-6)
-        scores = cos(test1,test2)
+        cos = nn.CosineSimilarity(dim=0, eps=1e-6)
+        scores = cos(q_embeds,u_embeds)
         scores = (scores+1)/2
         return scores
     
@@ -83,7 +85,7 @@ class SupervisedGraphSage(nn.Module):
         return self.xent(scores, ans)
 
 class CorrectnessPrediction():
-    def __init__(self,df,num_feats,lr,batch_size):
+    def __init__(self,df,num_feats,lr,batch_size,adj_list=None,if_cuda=False):
         self.df = df
         self.users = df['UserId'].unique()
         self.questions = df['QuestionId'].unique()
@@ -92,6 +94,11 @@ class CorrectnessPrediction():
         self.user_map, self.question_map = self.sequencify(self.users,self.questions)
         self.lr = lr
         self.batch_size = batch_size
+        self.if_cuda = if_cuda
+        
+        #Remove when load_data can be called
+        self.feat_data = np.zeros((self.num_nodes, self.num_feats))
+        self.adj_lists = adj_list
     
     def sequencify(self,users,questions):
         user_map, question_map = {}, {}
@@ -102,6 +109,8 @@ class CorrectnessPrediction():
         return user_map, question_map
     
     def load_data(self):
+        if self.adj_lists != None :
+            return self.adj_lists
         self.feat_data = np.zeros((self.num_nodes, self.num_feats))
 #         labels = np.empty((num_nodes,1), dtype=np.int64)
 #         node_map = {}
@@ -121,9 +130,9 @@ class CorrectnessPrediction():
             uid,qid = self.user_map[row['UserId']], self.question_map[row['QuestionId']]
             self.adj_lists[uid].add(qid)
             self.adj_lists[qid].add(uid)
-            if(index%1000==0):
+            if(index%10000==0):
                 print(str(index)+' Completed')
-        return 
+        return self.adj_lists
 
     def run_model(self):
         np.random.seed(1)
@@ -131,23 +140,31 @@ class CorrectnessPrediction():
 #         feat_data, labels, adj_lists = load_cora()
         features = nn.Embedding(self.num_nodes, self.num_feats)
         features.weight = nn.Parameter(torch.FloatTensor(self.feat_data), requires_grad=False)
+        print('Features weight initialized')
        # features.cuda()
-
-        agg1 = MeanAggregator(features, cuda=True)
-        enc1 = Encoder(features, self.num_feats, 128, self.adj_lists, agg1, gcn=True, cuda=False)
-        agg2 = MeanAggregator(lambda nodes : enc1(nodes).t(), cuda=False)
+        
+        agg1 = MeanAggregator(features, cuda=self.if_cuda)
+        print('Agg 1 Initialized')
+        enc1 = Encoder(features, self.num_feats, 128, self.adj_lists, agg1, gcn=True, cuda=self.if_cuda)
+        print('Encoder 1 Initialized')
+        agg2 = MeanAggregator(lambda nodes : enc1(nodes).t(), cuda=self.if_cuda)
+        print('Agg 2 Initialized')
         enc2 = Encoder(lambda nodes : enc1(nodes).t(), enc1.embed_dim, 128, self.adj_lists, agg2,
-                base_model=enc1, gcn=True, cuda=False)
+                base_model=enc1, gcn=True, cuda=self.if_cuda)
+        print('Encoder 2 Initialized')
         enc1.num_samples = 5
         enc2.num_samples = 5
 
         graphsage = SupervisedGraphSage(enc2)
+        print('Model is Initialized')
     #    graphsage.cuda()
         
         train_dataset = Question_Ans(self.df,mode='train')
         val_dataset = Question_Ans(self.df,mode='val')
+        print('Dataloader Class Called')
         train_dataloader = torch.utils.data.DataLoader(train_dataset,batch_size=self.batch_size, shuffle=True)
         val_dataloader = torch.utils.data.DataLoader(val_dataset,batch_size=self.batch_size, shuffle=False)
+        print('Dataloaded')
 #         rand_indices = np.random.permutation(num_nodes)
 #         test = rand_indices[:1000]
 #         val = rand_indices[1000:1500]
@@ -157,18 +174,41 @@ class CorrectnessPrediction():
         times = []
         
         phase = 'train'
-        for questions,users,ans in tqdm(train_dataloader[phase]):
+        batch = 0
+        for questions,users,ans in tqdm(train_dataloader):
+            batch += 1
 #             batch_nodes = train[:256]
 #             random.shuffle(train)
             start_time = time.time()
             optimizer.zero_grad()
+            if(self.if_cuda):
+                ans = ans.type(torch.cuda.FloatTensor)
+            else : 
+                ans = ans.type(torch.FloatTensor)
             loss = graphsage.loss(questions,users, ans)
             loss.backward()
             optimizer.step()
             end_time = time.time()
             times.append(end_time-start_time)
-#             print(batch, loss.data[0])
+            print(batch, loss.data)
+        
+        val_losses = []
+        batch = 0
+        for questions,users,ans in tqdm(val_dataloader):
+            batch += 1
+#             batch_nodes = train[:256]
+#             random.shuffle(train)
+            start_time = time.time()
+            optimizer.zero_grad()
+            loss = graphsage.loss(questions,users, ans)
+            val_losses.append(loss)
+#             loss.backward()
+#             optimizer.step()
+            end_time = time.time()
+            times.append(end_time-start_time)
+            print(batch, loss.data)
 
-        val_output = graphsage.forward(val) 
-        print("Validation F1:", f1_score(labels[val], val_output.data.numpy().argmax(axis=1), average="micro"))
-        print("Average batch time:", np.mean(times))
+#         val_output = graphsage.l(val) 
+#         print("Validation F1:", f1_score(labels[val], val_output.data.numpy().argmax(axis=1), average="micro"))
+#         print("Average batch time:", np.mean(times))
+        return val_losses
