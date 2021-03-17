@@ -42,10 +42,14 @@ class MeanAggregator(nn.Module):
                             )) if len(to_neigh) >= num_sample else to_neigh for to_neigh in to_neighs]
         else:
             samp_neighs = to_neighs
-
+        
+#         print('Sample Neighs : ', samp_neighs)
         if self.gcn:
+#             print('GCN YES')
             samp_neighs = [samp_neigh + set([nodes[i]]) for i, samp_neigh in enumerate(samp_neighs)]
+#         print('Sample Neighs 2: ', samp_neighs)
         unique_nodes_list = list(set.union(*samp_neighs))
+#         print('Max and min of Unique Node List : ', max(unique_nodes_list), min(unique_nodes_list) )
         unique_nodes = {n:i for i,n in enumerate(unique_nodes_list)}
         mask = Variable(torch.zeros(len(samp_neighs), len(unique_nodes)))
         column_indices = [unique_nodes[n] for samp_neigh in samp_neighs for n in samp_neigh]   
@@ -55,6 +59,7 @@ class MeanAggregator(nn.Module):
             mask = mask.cuda()
         num_neigh = mask.sum(1, keepdim=True)
         mask = mask.div(num_neigh)
+#         print('Aggregator forward bkpt')
         if self.cuda:
             embed_matrix = self.features(torch.LongTensor(unique_nodes_list).cuda())
         else:

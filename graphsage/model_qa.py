@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from encoders import Encoder
 from aggregators import MeanAggregator
+from utils import *
 
 """
 Simple supervised GraphSAGE model as well as examples running the model
@@ -21,13 +22,15 @@ on the Cora and Pubmed datasets.
 """
 
 class Question_Ans(Dataset):
-    def __init__(self, df, mode='train'):
+    def __init__(self, df, mode='train', qmap=None, umap=None):
         self.df = df
+        self.qmap = qmap
+        self.umap = umap
         self.questionid = self.df['QuestionId'].values
         self.userid = self.df['UserId'].values
         self.ans = self.df['IsCorrect'].values
         
-        self.ans = 2*self.ans - 1
+#         self.ans = 2*self.ans - 1
         
         self.length=len(self.ans)
         
@@ -54,8 +57,8 @@ class Question_Ans(Dataset):
     
     def __getitem__(self, idx):
         
-        qid = self.questionid[idx]
-        uid = self.userid[idx]
+        qid = self.qmap[self.questionid[idx]]
+        uid = self.umap[self.userid[idx]]
         ans = self.ans[idx]
         return qid,uid,ans
 
@@ -70,34 +73,59 @@ class SupervisedGraphSage(nn.Module):
     def get_score(self,q_embeds,u_embeds):
         cos = nn.CosineSimilarity(dim=0, eps=1e-6)
         scores = cos(q_embeds,u_embeds)
+#         print(q_embeds,u_embeds)
+#         print(scores)
         scores = (scores+1)/2
         return scores
     
     def forward(self, questions, users):
         q_embeds = self.enc(questions)
         u_embeds = self.enc(users)
+#         print(q_embeds,u_embeds)
+        if torch.isnan(q_embeds).any():
+            print(q_embeds,'Q is NaN')
+            exit(1)
+        if torch.isnan(u_embeds).any():
+            print(u_embeds,'U is NaN')
+            exit(1)
         scores = self.get_score(q_embeds,u_embeds)
         return scores.t()
+    
+    def get_pred(self,scores):
+        prediction_vals = scores*2 - 1
+        predictions = torch.sign(prediction_vals)
+        predictions = (predictions+1)/2
+        return predictions
 
     def loss(self, question, users, ans):
         scores = self.forward(question, users)
+#         print(torch.max(scores), torch.mean(scores))
+        pred_corr = self.get_pred(scores)
+        if torch.isnan(scores).any():
+            print(scores,'Score is NaN')
+            exit(1)
+        if torch.isnan(ans).any():
+            print(ans,'Ans is NaN')
+            exit(1)
 #         return self.xent(scores, labels.squeeze())
-        return self.xent(scores, ans)
+        return self.xent(scores, ans), pred_corr
 
 class CorrectnessPrediction():
-    def __init__(self,df,num_feats,lr,batch_size,adj_list=None,if_cuda=False):
+    def __init__(self,df,num_feats,lr,batch_size,adj_list=None,if_cuda=False, num_epochs=100):
         self.df = df
         self.users = df['UserId'].unique()
         self.questions = df['QuestionId'].unique()
         self.num_nodes = len(self.users) + len(self.questions)
+#         print('Total Nodes = ', self.num_nodes)
         self.num_feats = num_feats
         self.user_map, self.question_map = self.sequencify(self.users,self.questions)
         self.lr = lr
         self.batch_size = batch_size
         self.if_cuda = if_cuda
+        self.num_epochs = num_epochs
         
         #Remove when load_data can be called
-        self.feat_data = np.zeros((self.num_nodes, self.num_feats))
+        self.feat_data = np.random.rand(self.num_nodes, self.num_feats)
         self.adj_lists = adj_list
     
     def sequencify(self,users,questions):
@@ -106,6 +134,7 @@ class CorrectnessPrediction():
             user_map[users[i]] = i
         for i in range(len(questions)):
             question_map[questions[i]] = i+len(users)
+        print('In Sequencify total mappings = ', max(list(user_map.values())),max(list(question_map.values())))
         return user_map, question_map
     
     def load_data(self):
@@ -149,18 +178,24 @@ class CorrectnessPrediction():
         print('Encoder 1 Initialized')
         agg2 = MeanAggregator(lambda nodes : enc1(nodes).t(), cuda=self.if_cuda)
         print('Agg 2 Initialized')
-        enc2 = Encoder(lambda nodes : enc1(nodes).t(), enc1.embed_dim, 128, self.adj_lists, agg2,
+        enc2 = Encoder(lambda nodes : enc1(nodes).t(), enc1.embed_dim, 64, self.adj_lists, agg2,
                 base_model=enc1, gcn=True, cuda=self.if_cuda)
         print('Encoder 2 Initialized')
-        enc1.num_samples = 5
-        enc2.num_samples = 5
+        enc1.num_sample = 6
+        enc2.num_sample = 4
+        
 
         graphsage = SupervisedGraphSage(enc2)
         print('Model is Initialized')
+        print('Model Weights : ')
+        print(enc1.weight)
+        print(enc2.weight)
+        print('End')
+        
     #    graphsage.cuda()
         
-        train_dataset = Question_Ans(self.df,mode='train')
-        val_dataset = Question_Ans(self.df,mode='val')
+        train_dataset = Question_Ans(self.df,mode='train',umap=self.user_map,qmap=self.question_map)
+        val_dataset = Question_Ans(self.df,mode='val',umap=self.user_map,qmap=self.question_map)
         print('Dataloader Class Called')
         train_dataloader = torch.utils.data.DataLoader(train_dataset,batch_size=self.batch_size, shuffle=True)
         val_dataloader = torch.utils.data.DataLoader(val_dataset,batch_size=self.batch_size, shuffle=False)
@@ -173,40 +208,67 @@ class CorrectnessPrediction():
         optimizer = torch.optim.SGD(filter(lambda p : p.requires_grad, graphsage.parameters()), lr=self.lr)
         times = []
         
-        phase = 'train'
-        batch = 0
-        for questions,users,ans in tqdm(train_dataloader):
-            batch += 1
-#             batch_nodes = train[:256]
-#             random.shuffle(train)
-            start_time = time.time()
-            optimizer.zero_grad()
-            if(self.if_cuda):
-                ans = ans.type(torch.cuda.FloatTensor)
-            else : 
-                ans = ans.type(torch.FloatTensor)
-            loss = graphsage.loss(questions,users, ans)
-            loss.backward()
-            optimizer.step()
-            end_time = time.time()
-            times.append(end_time-start_time)
-            print(batch, loss.data)
-        
-        val_losses = []
-        batch = 0
-        for questions,users,ans in tqdm(val_dataloader):
-            batch += 1
-#             batch_nodes = train[:256]
-#             random.shuffle(train)
-            start_time = time.time()
-            optimizer.zero_grad()
-            loss = graphsage.loss(questions,users, ans)
-            val_losses.append(loss)
-#             loss.backward()
-#             optimizer.step()
-            end_time = time.time()
-            times.append(end_time-start_time)
-            print(batch, loss.data)
+        for epoch in range(self.num_epochs):
+            phase = 'train'
+            batch = 0
+#             print('Printing Num Samples')
+#             print('Enc2 : ', graphsage.enc.num_sample)
+#             print('Enc2 features : ', graphsage.enc.features)
+#             print('Hey')
+    #         print('Enc1 : ', graphsage.enc..num_samples)
+            running_loss = 0
+            tk0 = tqdm(train_dataloader, total=int(len(train_dataloader)))
+            confusion_matrix_train = [[0,0],[0,0]]
+            for questions,users,ans in tk0:
+                batch += 1
+    #             batch_nodes = train[:256]
+    #             random.shuffle(train)
+                start_time = time.time()
+                optimizer.zero_grad()
+                if(self.if_cuda):
+                    ans = ans.type(torch.cuda.FloatTensor)
+                else : 
+                    ans = ans.type(torch.FloatTensor)
+#                 print(questions,users)
+                loss, preds = graphsage.loss(questions,users, ans)
+                for i,x in enumerate(preds):
+                    confusion_matrix_train[int(preds[i])][int(ans[i])] += 1
+                metrics = get_metrics(confusion_matrix_train)
+                loss.backward()
+                optimizer.step()
+                end_time = time.time()
+                times.append(end_time-start_time)
+                running_loss += loss.data
+                tk0.set_postfix(loss=(running_loss / (batch * train_dataloader.batch_size)),suffix=str(metrics))
+#                 tk0.set_postfix(suffix=str(metrics))
+                if(batch % 1000 == 0) :
+                    print(confusion_matrix_train)
+
+            val_losses = []
+            batch = 0
+            running_loss = 0
+            confusion_matrix_val = [[0,0],[0,0]]
+            tk1 = tqdm(val_dataloader, total=int(len(val_dataloader)))
+            for questions,users,ans in tk1:
+                batch += 1
+    #             batch_nodes = train[:256]
+    #             random.shuffle(train)
+                start_time = time.time()
+                optimizer.zero_grad()
+                loss, preds = graphsage.loss(questions,users, ans)
+                for i,x in enumerate(preds):
+                    confusion_matrix_val[int(preds[i])][int(ans[i])] += 1
+                metrics = get_metrics(confusion_matrix_val)
+                val_losses.append(loss)
+    #             loss.backward()
+    #             optimizer.step()
+                end_time = time.time()
+                times.append(end_time-start_time)
+                running_loss += loss.data
+                tk1.set_postfix(loss=(running_loss / (batch * val_dataloader.batch_size)),suffix=str(metrics))
+#                 tk1.set_postfix(suffix=str(metrics))
+                if(batch % 1000 == 0) :
+                    print(confusion_matrix_val)
 
 #         val_output = graphsage.l(val) 
 #         print("Validation F1:", f1_score(labels[val], val_output.data.numpy().argmax(axis=1), average="micro"))
