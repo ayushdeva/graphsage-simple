@@ -171,6 +171,8 @@ class CorrectnessPrediction():
         features.weight = nn.Parameter(torch.FloatTensor(self.feat_data), requires_grad=False)
         print('Features weight initialized')
        # features.cuda()
+        if self.if_cuda:
+            features = features.cuda()
         
         agg1 = MeanAggregator(features, cuda=self.if_cuda)
         print('Agg 1 Initialized')

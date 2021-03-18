@@ -26,8 +26,12 @@ class Encoder(nn.Module):
         self.embed_dim = embed_dim
         self.cuda = cuda
         self.aggregator.cuda = cuda
-        self.weight = nn.Parameter(
-                torch.FloatTensor(embed_dim, self.feat_dim if self.gcn else 2 * self.feat_dim))
+        if self.cuda : 
+            self.weight = nn.Parameter(
+                    torch.cuda.FloatTensor(embed_dim, self.feat_dim if self.gcn else 2 * self.feat_dim))
+        else : 
+            self.weight = nn.Parameter(
+                    torch.FloatTensor(embed_dim, self.feat_dim if self.gcn else 2 * self.feat_dim))
         init.xavier_uniform(self.weight)
 
     def forward(self, nodes):
@@ -61,7 +65,10 @@ class Encoder(nn.Module):
             combined = neigh_feats
 #         print(neigh_feats)
 #         print(combined)
-        combined = F.relu(self.weight.mm(combined.t()))
+        combined = combined.t()
+        if self.cuda : 
+            combined = combined.cuda()
+        combined = F.relu(self.weight.mm(combined))
         if torch.isnan(combined).any():
             print(combined,'Combined Feats is NaN')
             exit(1)

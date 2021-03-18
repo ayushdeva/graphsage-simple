@@ -57,6 +57,7 @@ class MeanAggregator(nn.Module):
         mask[row_indices, column_indices] = 1
         if self.cuda:
             mask = mask.cuda()
+#             unique_nodes_list = unique_nodes_list.cuda()
         num_neigh = mask.sum(1, keepdim=True)
         mask = mask.div(num_neigh)
 #         print('Aggregator forward bkpt')
