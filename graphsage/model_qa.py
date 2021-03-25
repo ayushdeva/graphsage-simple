@@ -162,6 +162,45 @@ class CorrectnessPrediction():
             if(index%10000==0):
                 print(str(index)+' Completed')
         return self.adj_lists
+    
+    def validate_model(self):
+        np.random.seed(1)
+        random.seed(1)
+        train_dataset = Question_Ans(self.df,mode='train',umap=self.user_map,qmap=self.question_map)
+        val_dataset = Question_Ans(self.df,mode='val',umap=self.user_map,qmap=self.question_map)
+        print('Dataloader Class Called')
+#         train_dataloader = torch.utils.data.DataLoader(train_dataset,batch_size=self.batch_size, shuffle=True)
+        val_dataloader = torch.utils.data.DataLoader(val_dataset,batch_size=self.batch_size, shuffle=False)
+        print('Dataloaded')
+
+#         optimizer = torch.optim.SGD(filter(lambda p : p.requires_grad, graphsage.parameters()), lr=self.lr)
+        times = []
+        val_losses = []
+        batch = 0
+        running_loss = 0
+        confusion_matrix_val = [[0,0],[0,0]]
+        tk1 = tqdm(val_dataloader, total=int(len(val_dataloader)))
+        for questions,users,ans in tk1:
+            batch += 1
+#             batch_nodes = train[:256]
+#             random.shuffle(train)
+            start_time = time.time()
+#             optimizer.zero_grad()
+            loss, preds = graphsage.loss(questions,users, ans)
+            for i,x in enumerate(preds):
+                confusion_matrix_val[int(preds[i])][int(ans[i])] += 1
+            metrics = get_metrics(confusion_matrix_val)
+            val_losses.append(loss)
+#             loss.backward()
+#             optimizer.step()
+            end_time = time.time()
+            times.append(end_time-start_time)
+            running_loss += loss.data
+            tk1.set_postfix(loss=(running_loss / (batch * val_dataloader.batch_size)),suffix=str(metrics))
+#                 tk1.set_postfix(suffix=str(metrics))
+            if(batch % 1000 == 0) :
+                print(confusion_matrix_val)
+        return val_losses
 
     def run_model(self):
         np.random.seed(1)
@@ -275,4 +314,4 @@ class CorrectnessPrediction():
 #         val_output = graphsage.l(val) 
 #         print("Validation F1:", f1_score(labels[val], val_output.data.numpy().argmax(axis=1), average="micro"))
 #         print("Average batch time:", np.mean(times))
-        return val_losses
+        return val_losses, graphsage
